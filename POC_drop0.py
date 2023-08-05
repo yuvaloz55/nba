@@ -2,8 +2,8 @@ import collections
 import enum
 import logging
 from datetime import datetime
-from itertools import islice, tee
-from typing import Dict, Iterator, Optional, Tuple, Union
+from itertools import tee
+from typing import Iterator, cast
 
 import attrs
 import pandas as pd
@@ -14,6 +14,7 @@ _YEAR = "2022-23"
 _TIME_FORMAT = "%M:%S"
 _MAX_TIME_DELTA = 7
 _PUBLISH_FLAG = True
+_NBA_LEAGUE_ID = "00"
 
 
 def _setup_logger() -> None:
@@ -31,7 +32,7 @@ class Plays(enum.IntEnum):
 @attrs.frozen
 class InitFollowPlays:
     init_play: Plays
-    follow_plays: Tuple[Plays]
+    follow_plays: tuple[Plays]
 
     @classmethod
     def from_play(cls, init_play, follow_plays):
@@ -40,7 +41,7 @@ class InitFollowPlays:
 
 @attrs.frozen
 class PlayerInitFollowData:
-    player_name: Optional[str]
+    player_name: str | None
     init_play: str
     follow_play: str
 
@@ -55,8 +56,8 @@ class GameDetails:
     matchup: str
 
     @classmethod
-    def from_game_finder(cls, game_id, matchup):
-        return cls(game_id, matchup)
+    def from_game_data(cls, game_data):
+        return cls(game_data["GAME_ID"], game_data["MATCHUP"])
 
 
 _OFFENSIVE_REBOUND_FLOW = InitFollowPlays.from_play(
@@ -70,15 +71,25 @@ def _pairwise(iterable: Iterator) -> zip:
     return zip(a, b)
 
 
-def _get_game_ids_by_season_and_type(season: str, season_type: str) -> Iterator[GameDetails]:
-    games_data = LeagueGameFinder(season_nullable=season, season_type_nullable=season_type).get_normalized_dict()[
-        "LeagueGameFinderResults"
-    ]
+def _remove_duplicates(games_data: list[dict[str, str]]) -> list[GameDetails]:
+    unique_games_id = []
+    unique_games_data = []
+    for game_data in games_data:
+        if game_data["GAME_ID"] in unique_games_id:
+            continue
+
+        unique_games_id.append(game_data["GAME_ID"])
+        unique_games_data.append(GameDetails.from_game_data(game_data))
+
+    return unique_games_data
+
+
+def _get_game_ids_by_season_and_type(season: str, season_type: str) -> list[GameDetails]:
+    games_data = LeagueGameFinder(
+        season_nullable=season, season_type_nullable=season_type, league_id_nullable=_NBA_LEAGUE_ID
+    ).get_normalized_dict()["LeagueGameFinderResults"]
     logging.info("Fetching all games for season year %s and type %s", season, season_type)
-    return (
-        GameDetails.from_game_finder(game_dict["GAME_ID"], game_dict["MATCHUP"])
-        for game_dict in islice(games_data, 0, None, 2)
-    )
+    return _remove_duplicates(games_data)
 
 
 def _is_time_valid(play_timestamp: str, next_play_timestamp: str) -> bool:
@@ -87,7 +98,7 @@ def _is_time_valid(play_timestamp: str, next_play_timestamp: str) -> bool:
     ).total_seconds() <= _MAX_TIME_DELTA
 
 
-def _is_follow_play(play_event: int, follow_plays: Tuple[Plays]) -> bool:
+def _is_follow_play(play_event: int, follow_plays: tuple[Plays]) -> bool:
     for follow_play in follow_plays:
         if play_event == follow_play:
             return True
@@ -96,12 +107,12 @@ def _is_follow_play(play_event: int, follow_plays: Tuple[Plays]) -> bool:
 
 
 def _get_init_and_follow_play(
-    play: Dict[str, Union[str, int]], next_play: Dict[str, Union[str, int]], init_and_follow_plays: InitFollowPlays
-) -> Optional[PlayerInitFollowData]:
-    play_event = play["EVENTMSGTYPE"]
-    next_play_event = next_play["EVENTMSGTYPE"]
-    play_timestamp = play["PCTIMESTRING"]
-    next_play_timestamp = next_play["PCTIMESTRING"]
+    play: dict[str, str | int], next_play: dict[str, str | int], init_and_follow_plays: InitFollowPlays
+) -> PlayerInitFollowData | None:
+    play_event = cast(int, play["EVENTMSGTYPE"])
+    next_play_event = cast(int, next_play["EVENTMSGTYPE"])
+    play_timestamp = cast(str, play["PCTIMESTRING"])
+    next_play_timestamp = cast(str, next_play["PCTIMESTRING"])
     if play_event == init_and_follow_plays.init_play and _is_time_valid(play_timestamp, next_play_timestamp):
         if _is_follow_play(next_play_event, init_and_follow_plays.follow_plays):
             return PlayerInitFollowData(play["PLAYER1_NAME"], Plays(play_event).name, Plays(next_play_event).name)
@@ -110,7 +121,7 @@ def _get_init_and_follow_play(
 
 
 def _update_games_data_with_plays(
-    game_data: collections.defaultdict, player_init_follow_data: Optional[PlayerInitFollowData]
+    game_data: collections.defaultdict, player_init_follow_data: PlayerInitFollowData | None
 ) -> collections.defaultdict:
     if player_init_follow_data is not None:
         game_data[player_init_follow_data.player_name][player_init_follow_data.init_play] += 1
